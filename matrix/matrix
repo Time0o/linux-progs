@@ -1,0 +1,242 @@
+#!/bin/bash
+
+USAGE="[dims|transpose|mean|add|multiply] [ARGS]
+
+dims [M]:       print the dimensions of a matrix passed via file or stdin
+transpose [M]:  print the transpose of a matrix passed via file or stdin
+mean [M]:       print the means of each column of a matrix passed via file or stdin
+add M1 M2:      print the sum of two matrices passed as files
+multiply M1 M2: print the matrix product of two matrices passed as files
+
+M/M1/M2 should each simply be several newline separated rows, containing the same
+number of elements separated by arbitrary whitespace."
+
+PRETTY=false
+
+progname=$(basename $0)
+
+error() {
+    >&2 echo "$progname: error: $1"
+    exit 1
+}
+
+usage_error() {
+    >&2 echo "Usage: $progname: $USAGE"
+    exit 1
+}
+
+dimension_error() {
+   err="matrix dimension mismatch"
+   err="$err (${numrows1}x${numcols1} and ${numrows2}x${numcols2})"
+
+   error "$err"
+}
+
+assert_readable() {
+    [ ! -r "$1" ] && error "file $1 not readable"
+}
+
+parse_matrix() {
+    declare -a matrix=()
+
+    declare _numrows=0
+    declare _numcols=0
+
+    lineno=1
+    while read line; do
+        # file location to display on parsing error
+        loc="line $lineno of $1"
+
+        # skip empty lines
+        if [[ ! "$line" =~ ^[[:space:]]*$ ]]; then
+            # read in next matrix row
+            row=()
+
+            if [[ "$line" =~ ^[[:space:]]*(-?[0-9]*[[:space:]]*)*$ ]]; then
+                for entry in ${BASH_REMATCH[0]}; do
+                    row+=($entry)
+                done
+            else
+                error "malformed matrix row in line $loc"
+            fi
+
+            # validate number of columns in row
+            _numcols=${#row[@]}
+
+            if [ $lineno -eq 1 ]; then
+                numcols=$_numcols
+            elif [ $_numcols -ne $numcols ]; then
+                err="invalid row dimension in $loc"
+                err="$err (expected $numcols but got $_numcols)"
+
+                error "$err"
+            fi
+
+            # append row to matrix
+            matrix+=(${row[@]})
+
+            ((++_numrows))
+        fi
+
+        ((++lineno))
+    done < "${1:-/dev/stdin}"
+
+    if [ $2 -eq 1 ]; then
+        matrix1=("${matrix[@]}")
+
+        numrows1=$_numrows
+        numcols1=$_numcols
+        numelems1=$((numrows1 * numcols1))
+
+    elif [ $2 -eq 2 ]; then
+        matrix2=("${matrix[@]}")
+
+        numrows2=$_numrows
+        numcols2=$_numcols
+        numelems2=$((numrows2 * numcols2))
+    fi
+}
+
+print_matrix() {
+    # determine 'widest' number in matrix
+    if [ $numrows -gt 1 ]; then
+        padding=0
+
+        for ((i = 0; i < $((numrows * numcols)); ++i)); do
+            _padding=${#matrix[i]}
+            [ $_padding -gt $padding ] && padding=$_padding
+        done
+    fi
+
+    # print matrix row by row
+    for ((r = 0; r < $numrows; ++r)); do
+        row="${matrix[@]:$((r * numcols)):$numcols}"
+
+        # print with cell padding and strip trailing whitespace
+        if [ $PRETTY = true ]; then
+            if [ $numrows -gt 1 ]; then
+                printf "%${padding}s " $row | sed -e 's/[[:space:]]*$//'
+                printf "\n"
+            else
+                echo "$row"
+            fi
+        else
+            printf "%s\t" $row | sed -e 's/[[:space:]]*$//'
+            printf "\n"
+        fi
+    done
+}
+
+dims() {
+    parse_matrix "$1" 1
+
+    echo "$numrows1 $numcols1"
+}
+
+transpose() {
+    parse_matrix "$1" 1
+
+    declare -a matrix=($(for i in {1..$numelems1}; do echo 0; done))
+
+    for ((r = 0; r < $numrows1; ++r)); do
+        for ((c = 0; c < $numcols1; ++c)); do
+            i=$((r * numcols1 + c))
+            i_transposed=$((c * numrows1 + r))
+
+            matrix[$i_transposed]=${matrix1[$i]}
+        done
+    done
+
+    numrows=$numcols1
+    numcols=$numrows1
+
+    print_matrix
+}
+
+mean() {
+    parse_matrix "$1" 1
+
+    declare -a matrix=($(for i in {1..$numcols1}; do echo 0; done))
+
+    for ((c = 0; c < $numcols1; ++c)); do
+        for ((r = 0; r < $numrows1; ++r)); do
+            ((matrix[c] += matrix1[$((r * numcols1 + c))]))
+        done
+
+        matrix[c]=$(printf "%.0f" $(bc -l <<< "${matrix[c]} / $numrows1"))
+    done
+
+    numrows=1
+    numcols=$numcols1
+
+    print_matrix
+}
+
+add() {
+    parse_matrix "$1" 1
+    parse_matrix "$2" 2
+
+    if [ $numrows1 -ne $numrows2 ] || [ $numcols1 -ne $numcols2 ]; then
+        dimension_error
+    fi
+
+    declare -a matrix=($(for i in {1..$numelems1}; do echo 0; done))
+
+    for ((r = 0; r < $numrows1; ++r)); do
+        for ((c = 0; c < $numcols1; ++c)); do
+            i=$((r * numcols + c))
+
+            ((matrix[i] = matrix1[i] + matrix2[i]))
+        done
+    done
+
+    numrows=$numrows1
+    numcols=$numcols1
+
+    print_matrix
+}
+
+multiply() {
+    parse_matrix "$1" 1
+    parse_matrix "$2" 2
+
+    [ $numcols1 -ne $numrows2 ] && dimension_error
+
+    numrows=$numrows1
+    numcols=$numcols2
+    numelems=$((numrows * numcols))
+
+    declare -a matrix=($(for i in {1..$numelems}; do echo 0; done))
+
+    for ((r = 0; r < $numrows; ++r)); do
+        for ((c = 0; c < $numcols; ++c)); do
+            for ((i = 0; i < $numcols1; ++i)); do
+                ((matrix[r * numcols + c] +=
+                  matrix1[$((r * numcols1 + i))] *
+                  matrix2[$((i * numcols2 + c))]))
+            done
+        done
+    done
+
+    print_matrix
+}
+
+# validate command line arguments
+[ $# -eq 0 ] && usage_error
+
+case "$1" in
+    "dims" | "transpose" | "mean")
+        [ $# -gt 2 ] && usage_error
+        [ $# -eq 2 ] && assert_readable "$2"
+        ;;
+    "add" | "multiply")
+        [ $# -ne 3 ] && usage_error
+        assert_readable "$2"
+        assert_readable "$3"
+        ;;
+    *)
+        error "unknown operation: $1"
+esac
+
+# execute operation
+$1 "${@:2}"

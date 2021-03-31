@@ -1,0 +1,11 @@
+parse/src/*
+!parse/src/.gitkeep
+
+parse/include/*
+!parse/include/.gitkeep
+
+obj/*
+!obj/.gitkeep
+
+bin/*
+!bin/.gitkeep
